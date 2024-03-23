@@ -1,4 +1,5 @@
 export class TreeNode {
+  // h2-1, h3-2, etc
   key: string;
   title: string;
   level: number;
@@ -13,12 +14,12 @@ export class TreeNode {
 }
 /**
  * h1 1
- * h2 1.1
- * h3 1.1.1
- * h4 1.1.2.1
- * h4 1.1.2.2
- * h2 1.2
- * h2 1.3
+ *   h2 1.1
+ *     h3 1.1.1
+ *       h4 1.1.2.1
+ *       h4 1.1.2.2
+ *   h2 1.2
+ *   h2 1.3
  */
 
 export function getHeadingTree(doc = document) {
@@ -48,13 +49,35 @@ export function getHeadingTree(doc = document) {
   return root;
 }
 
-export function modifyHeadings(doc: Document) {
-  const headings = doc.querySelectorAll("h1, h2, h3, h4, h5, h6");
-  headings.forEach((heading, i) => {
+// modify heading/block, and get heading/block flag
+export function modifyDest(doc: Document) {
+  const data = new Map();
+  doc.querySelectorAll("h1, h2, h3, h4, h5, h6").forEach((heading: HTMLElement, i) => {
     const link = document.createElement("a") as HTMLAnchorElement;
-    link.href = `af://${heading.tagName.toLowerCase()}-${i}`;
+    const flag = `${heading.tagName.toLowerCase()}-${i}`;
+    link.href = `af://${flag}`;
     link.className = "md-print-anchor";
     heading.appendChild(link);
+    data.set(heading.dataset.heading, flag);
+  });
+
+
+  return data;
+}
+
+export function modifyAnchors(doc: Document, dest: Map<string, string>, basename: string) {
+  doc.querySelectorAll("a.internal-link").forEach((el: HTMLAnchorElement, i) => {
+    const [title, anchor] = el.dataset.href?.split("#") ?? [];
+    if (anchor?.length > 0) {
+      if (title?.length > 0 && title != basename) {
+        return;
+      }
+
+      const flag = dest.get(anchor);
+      if (flag && !anchor.startsWith("^")) {
+        el.href = `an://${flag}`;
+      }
+    }
   });
 }
 

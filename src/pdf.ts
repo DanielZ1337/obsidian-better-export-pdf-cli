@@ -1,17 +1,18 @@
+import * as fs from "fs/promises";
+import electron, { WebviewTag } from "electron";
 import { PDFDocument, PDFName, PDFDict, PDFArray, PDFRef, PDFHexString, StandardFonts } from "pdf-lib";
+import { FrontMatterCache } from "obsidian";
 
 import { TreeNode, getHeadingTree } from "./utils";
-import { TFile } from "obsidian";
 import { TConfig } from "./modal";
-import electron, { WebviewTag } from "electron";
-import * as fs from "fs/promises";
 import { BetterExportPdfPluginSettings } from "./main";
 
 interface TPosition {
   [key: string]: number[];
 }
 
-export async function getHeadingPosition(pdfDoc: PDFDocument): Promise<TPosition> {
+// heading, block position
+export async function getDestPosition(pdfDoc: PDFDocument): Promise<TPosition> {
   const pages = pdfDoc.getPages();
   const links: TPosition = {};
 
@@ -38,6 +39,55 @@ export async function getHeadingPosition(pdfDoc: PDFDocument): Promise<TPosition
             const linkUrl = regexMatch[1];
             const yPos = rect.y;
             links[linkUrl] = [pageIndex, yPos];
+          }
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+  });
+
+  return links;
+}
+
+// refer to: https://github.com/Hopding/pdf-lib/issues/206
+export async function setAnchors(pdfDoc: PDFDocument, links: TPosition) {
+  const pages = pdfDoc.getPages();
+
+  pages.forEach((page, _) => {
+    const annots = page.node.Annots();
+    if (!annots) {
+      return;
+    }
+    const numAnnotations = annots?.size() ?? 0;
+
+    for (let idx = 0; idx < numAnnotations; idx++) {
+      try {
+        const linkAnnotRef = annots.get(idx);
+        const linkAnnot = annots.lookup(idx, PDFDict);
+        const subtype = linkAnnot.get(PDFName.of("Subtype"));
+        if (subtype?.toString() === "/Link") {
+          const linkDict = linkAnnot.get(PDFName.of("A")) as PDFDict;
+          // @ts-ignore
+          const uri = linkDict?.get(PDFName.of("URI")).toString();
+          console.debug("uri", uri);
+          const regexMatch = /^\(an:\/\/(.+)\)$/.exec(uri || "");
+
+          const key = regexMatch?.[1];
+          if (key && links?.[key]) {
+            const [pageIdx, yPos] = links[key];
+            const newAnnot = pdfDoc.context.obj({
+              Type: "Annot",
+              Subtype: "Link",
+              Rect: linkAnnot.lookup(PDFName.of("Rect")),
+              Border: linkAnnot.lookup(PDFName.of("Border")),
+              C: linkAnnot.lookup(PDFName.of("C")),
+              Dest: [pages[pageIdx].ref, "XYZ", null, yPos, null],
+            });
+
+            // @ts-ignore
+            // Replace all occurrences of the external annotation with the internal one
+            pdfDoc.context.assign(linkAnnotRef, newAnnot);
           }
         }
       } catch (err) {
@@ -246,34 +296,117 @@ export async function addPageNumbers(doc: PDFDocument, setting: PageSetting) {
   }
 }
 
-export async function editPDF(data: Uint8Array, doc: Document, maxLevel = 6): Promise<Uint8Array> {
+export type PdfFrontMatterCache = {
+  // pdf metadata
+  title?: string;
+  author?: string;
+  keywords?: string;
+  created_at?: string;
+  updated_at?: string;
+  creator?: string;
+  producer?: string;
+
+  // header/footer
+  headerTemplate?: string;
+  footerTemplate?: string;
+} & FrontMatterCache;
+
+export type EditPDFParamType = {
+  headings: TreeNode;
+  maxLevel: number;
+  displayMetadata?: boolean;
+  frontMatter?: PdfFrontMatterCache;
+};
+
+// add outlines
+export async function editPDF(
+  data: Uint8Array,
+  { headings, maxLevel, frontMatter, displayMetadata }: EditPDFParamType,
+): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.load(data);
-  const posistions = await getHeadingPosition(pdfDoc);
-  const headings = await getHeadingTree(doc);
+  const posistions = await getDestPosition(pdfDoc);
+
+  setAnchors(pdfDoc, posistions);
 
   const outlines = generateOutlines(headings, posistions, maxLevel);
+
   setOutline(pdfDoc, outlines);
+  if (displayMetadata) {
+    setMetadata(pdfDoc, frontMatter ?? {});
+  }
   data = await pdfDoc.save();
   return data;
+}
+
+// add pdf metadata [title, author, keywords, created_at, updated_at, creator, producer]
+export function setMetadata(
+  pdfDoc: PDFDocument,
+  { title, author, keywords, subject, creator, created_at, updated_at }: FrontMatterCache,
+) {
+  if (title) {
+    pdfDoc.setTitle(title, { showInWindowTitleBar: true });
+  }
+  if (author) {
+    pdfDoc.setAuthor(author);
+  }
+  if (keywords) {
+    pdfDoc.setKeywords(typeof keywords == "string" ? [keywords] : keywords);
+  }
+  if (subject) {
+    pdfDoc.setSubject(subject);
+  }
+  pdfDoc.setCreator(creator ?? "Obsidian");
+  pdfDoc.setProducer("Obsidian");
+  pdfDoc.setCreationDate(new Date(created_at ?? new Date()));
+  pdfDoc.setModificationDate(new Date(updated_at ?? new Date()));
 }
 
 export async function exportToPDF(
   outputFile: string,
   config: TConfig & BetterExportPdfPluginSettings,
-  webview: WebviewTag,
+  w: WebviewTag,
   doc: Document,
+  frontMatter?: FrontMatterCache,
 ) {
-
   const printOptions: electron.PrintToPDFOptions = {
+    landscape: config?.["landscape"],
+    printBackground: config?.["printBackground"],
+    generateTaggedPDF: config?.["generateTaggedPDF"],
     pageSize: config["pageSise"],
-    ...config,
     scale: config["scale"] / 100,
     margins: {
       marginType: "default",
     },
+    displayHeaderFooter: config["displayHeader"] || config["displayFooter"],
+    headerTemplate: config["displayHeader"]
+      ? frontMatter?.["headerTemplate"] ?? config["headerTemplate"]
+      : "<span></span>",
+    footerTemplate: config["displayFooter"]
+      ? frontMatter?.["footerTemplate"] ?? config["footerTemplate"]
+      : "<span></span>",
   };
 
-  if (config.marginType == "3") {
+  if (config.marginType == "0") {
+    printOptions["margins"] = {
+      marginType: "custom",
+      top: 0,
+      bottom: 0,
+      left: 0,
+      right: 0,
+    };
+  } else if (config.marginType == "1") {
+    printOptions["margins"] = {
+      marginType: "default",
+    };
+  } else if (config.marginType == "2") {
+    printOptions["margins"] = {
+      marginType: "custom",
+      top: 0.1,
+      bottom: 0.1,
+      left: 0.1,
+      right: 0.1,
+    };
+  } else if (config.marginType == "3") {
     // Custom Margin
     printOptions["margins"] = {
       marginType: "custom",
@@ -284,13 +417,15 @@ export async function exportToPDF(
     };
   }
 
-
-  const w = document.querySelector("webview:last-child") as WebviewTag;
-
   try {
     let data = await w.printToPDF(printOptions);
 
-    data = await editPDF(data, doc, parseInt(config?.maxLevel ?? "6"));
+    data = await editPDF(data, {
+      headings: getHeadingTree(doc),
+      frontMatter,
+      displayMetadata: config?.displayMetadata,
+      maxLevel: parseInt(config?.maxLevel ?? "6"),
+    });
 
     await fs.writeFile(outputFile, data);
 
@@ -303,11 +438,11 @@ export async function exportToPDF(
   }
 }
 
-export async function getOutputFile(file: TFile) {
+export async function getOutputFile(filename: string) {
   // @ts-ignore
   const result = await electron.remote.dialog.showSaveDialog({
     title: "Export to PDF",
-    defaultPath: file.basename + ".pdf",
+    defaultPath: filename + ".pdf",
     filters: [
       { name: "All Files", extensions: ["*"] },
       { name: "PDF", extensions: ["pdf"] },

@@ -1,7 +1,7 @@
-import { Modal, Setting, TFile, ButtonComponent, Notice } from "obsidian";
+import { Modal, Setting, TFile, ButtonComponent, Notice, TFolder, FrontMatterCache, parseLinktext } from "obsidian";
 import * as electron from "electron";
 import BetterExportPdfPlugin from "./main";
-import { renderMarkdown, getAllStyles, createWebview } from "./render";
+import { renderMarkdown, getAllStyles, createWebview, getPatchStyle, getFrontMatter, fixDoc } from "./render";
 import { exportToPDF, getOutputFile } from "./pdf";
 
 type PageSizeType = electron.PrintToPDFOptions["pageSize"];
@@ -13,7 +13,8 @@ export interface TConfig {
   landscape: boolean;
   scale: number;
   showTitle: boolean;
-  displayHeaderFooter: boolean;
+  displayHeader: boolean;
+  displayFooter: boolean;
 
   marginTop?: string;
   marginBottom?: string;
@@ -36,12 +37,14 @@ export class ExportConfigModal extends Modal {
   canceled: boolean;
   callback: Callback;
   plugin: BetterExportPdfPlugin;
-  file: TFile;
+  file: TFile | TFolder;
   preview: electron.WebviewTag;
   completed: boolean;
   doc: Document;
+  title: string;
+  frontMatter: FrontMatterCache;
 
-  constructor(plugin: BetterExportPdfPlugin, file: TFile, callback: Callback, config?: TConfig) {
+  constructor(plugin: BetterExportPdfPlugin, file: TFile | TFolder, config?: TConfig) {
     super(plugin.app);
     this.canceled = true;
     this.plugin = plugin;
@@ -50,7 +53,7 @@ export class ExportConfigModal extends Modal {
     this.config = {
       pageSise: "A4",
       marginType: "1",
-      showTitle: true,
+      showTitle: plugin.settings.showTitle ?? true,
       open: true,
       scale: 100,
       landscape: false,
@@ -58,10 +61,84 @@ export class ExportConfigModal extends Modal {
       marginBottom: "10",
       marginLeft: "10",
       marginRight: "10",
-
+      displayHeader: plugin.settings.displayHeader ?? true,
+      displayFooter: plugin.settings.displayHeader ?? true,
       ...(plugin.settings?.prevConfig ?? {}),
     } as TConfig;
-    this.callback = callback;
+  }
+
+  getFileCache(file: TFile) {
+    return this.app.metadataCache.getFileCache(file);
+  }
+
+  async renderFiles() {
+    const app = this.plugin.app;
+
+    const docs = [];
+    if (this.file instanceof TFolder) {
+      for (const file of this.file.children) {
+        if (file instanceof TFile && file.extension == "md") {
+          docs.push(await renderMarkdown(app, file, this.config));
+          Object.assign(this.frontMatter, getFrontMatter(app, file));
+        }
+      }
+    } else {
+      const doc0 = await renderMarkdown(app, this.file, this.config);
+      docs.push(doc0);
+      const matter = getFrontMatter(app, this.file);
+      Object.assign(this.frontMatter, matter);
+      if (matter.toc) {
+        const cache = this.getFileCache(this.file as TFile);
+        const files =
+          cache?.links
+            ?.map(({ link, displayText }) => {
+              const id = crypto.randomUUID();
+              const elem = doc0.querySelector(`a[data-href="${link}"]`) as HTMLAnchorElement;
+              if (elem) {
+                elem.href = `#${id}`;
+              }
+              return {
+                title: displayText,
+                file: this.app.metadataCache.getFirstLinkpathDest(link, this.file.path) as TFile,
+                id,
+              };
+            })
+            .filter((item) => item.file instanceof TFile) ?? [];
+        for (const item of files) {
+          docs.push(await renderMarkdown(app, item.file, this.config, item));
+          Object.assign(this.frontMatter, getFrontMatter(app, item.file));
+        }
+        const leaf = this.app.workspace.getLeaf();
+        await leaf.openFile(this.file);
+      }
+    }
+    this.doc = docs[0];
+    if (docs.length > 1) {
+      const sections = [];
+      for (const doc of docs) {
+        const element = doc.querySelector(".markdown-preview-view");
+
+        if (element) {
+          const section = this.doc.createElement("section");
+          Array.from(element.children).forEach((child) => {
+            section.appendChild(this.doc.importNode(child, true));
+          });
+
+          sections.push(section);
+        }
+      }
+      const root = this.doc.querySelector(".markdown-preview-view");
+      if (root) {
+        root.innerHTML = "";
+      }
+      sections.forEach((section) => {
+        root?.appendChild(section);
+      });
+    }
+
+    fixDoc(this.doc, this.title);
+
+    return this.doc;
   }
 
   async onOpen() {
@@ -72,8 +149,12 @@ export class ExportConfigModal extends Modal {
     const wrapper = this.contentEl.createDiv();
     wrapper.setAttribute("style", "display: flex; flex-direction: row; height: 75vh;");
 
+    const title = (this.file as TFile)?.basename ?? this.file?.name;
+    this.frontMatter = { title };
+    this.title = title;
+
     const appendWebview = async (e: HTMLDivElement) => {
-      this.doc = await renderMarkdown(this.plugin, this.file, this.config);
+      await this.renderFiles();
       const webview = createWebview();
       this.preview = e.appendChild(webview);
       this.preview.addEventListener("dom-ready", async (e) => {
@@ -82,14 +163,18 @@ export class ExportConfigModal extends Modal {
           await this.preview.insertCSS(css);
         });
         await this.preview.executeJavaScript(`
-        document.title = \`${this.file.basename}\`;
         document.body.innerHTML = decodeURIComponent(\`${encodeURIComponent(this.doc.body.innerHTML)}\`);
+        document.head.innerHTML = decodeURIComponent(\`${encodeURIComponent(document.head.innerHTML)}\`);
 				
         document.body.setAttribute("class", \`${document.body.getAttribute("class")}\`)
         document.body.setAttribute("style", \`${document.body.getAttribute("style")}\`)
         document.body.addClass("theme-light");
         document.body.removeClass("theme-dark");
+        document.title = \`${title}\`;
         `);
+        getPatchStyle().forEach(async (css) => {
+          await this.preview.insertCSS(css);
+        });
       });
     };
 
@@ -100,7 +185,11 @@ export class ExportConfigModal extends Modal {
 
     const contentEl = wrapper.createDiv();
     contentEl.setAttribute("style", "width:320px;margin-left:16px;");
-
+    contentEl.addEventListener("keyup", (event) => {
+      if (event.key === "Enter") {
+        handleExport();
+      }
+    });
     this.generateForm(contentEl);
 
     const handleExport = async () => {
@@ -108,9 +197,15 @@ export class ExportConfigModal extends Modal {
       await this.plugin.saveSettings();
 
       if (this.completed) {
-        const outputFile = await getOutputFile(this.file);
+        const outputFile = await getOutputFile(title);
         if (outputFile) {
-          await exportToPDF(outputFile, { ...this.plugin.settings, ...this.config }, this.preview, this.doc);
+          await exportToPDF(
+            outputFile,
+            { ...this.plugin.settings, ...this.config },
+            this.preview,
+            this.doc,
+            this.frontMatter,
+          );
           this.close();
         }
       } else {
@@ -120,7 +215,7 @@ export class ExportConfigModal extends Modal {
 
     new Setting(contentEl).setHeading().addButton((button) => {
       button.setButtonText("Export").onClick(handleExport);
-
+      button.setCta();
       fullWidthButton(button);
     });
 
@@ -142,15 +237,15 @@ export class ExportConfigModal extends Modal {
   }
 
   private generateForm(contentEl: HTMLDivElement) {
-    new Setting(contentEl).setName("Add filename as title").addToggle((toggle) =>
+    new Setting(contentEl).setName("Include file name as title").addToggle((toggle) =>
       toggle
-        .setTooltip("Add filename as title")
+        .setTooltip("Include file name as title")
         .setValue(this.config["showTitle"])
         .onChange(async (value) => {
           this.config["showTitle"] = value;
 
           if (this.completed) {
-            this.doc = await renderMarkdown(this.plugin, this.file, this.config);
+            await this.renderFiles();
             this.preview?.executeJavaScript(`
             document.body.innerHTML = decodeURIComponent(\`${encodeURIComponent(this.doc.body.innerHTML)}\`);
             `);
@@ -204,7 +299,7 @@ export class ExportConfigModal extends Modal {
     const topEl = new Setting(contentEl)
       .setName("Top/Bottom")
       .addText((text) => {
-				setInputWidth(text.inputEl)
+        setInputWidth(text.inputEl);
         text
           .setPlaceholder("margin top")
           .setValue(this.config["marginTop"] as string)
@@ -213,7 +308,7 @@ export class ExportConfigModal extends Modal {
           });
       })
       .addText((text) => {
-				setInputWidth(text.inputEl)
+        setInputWidth(text.inputEl);
         text
           .setPlaceholder("margin bottom")
           .setValue(this.config["marginBottom"] as string)
@@ -225,7 +320,7 @@ export class ExportConfigModal extends Modal {
     const btmEl = new Setting(contentEl)
       .setName("Left/Right")
       .addText((text) => {
-				setInputWidth(text.inputEl)
+        setInputWidth(text.inputEl);
         text
           .setPlaceholder("margin left")
           .setValue(this.config["marginLeft"] as string)
@@ -234,7 +329,7 @@ export class ExportConfigModal extends Modal {
           });
       })
       .addText((text) => {
-				setInputWidth(text.inputEl)
+        setInputWidth(text.inputEl);
         text
           .setPlaceholder("margin right")
           .setValue(this.config["marginRight"] as string)
@@ -262,12 +357,21 @@ export class ExportConfigModal extends Modal {
         }),
     );
 
-    new Setting(contentEl).setName("Display header/footer").addToggle((toggle) =>
+    new Setting(contentEl).setName("Display header").addToggle((toggle) =>
       toggle
-        .setTooltip("Display header/footer")
-        .setValue(this.config["displayHeaderFooter"])
+        .setTooltip("Display header")
+        .setValue(this.config["displayHeader"])
         .onChange(async (value) => {
-          this.config["displayHeaderFooter"] = value;
+          this.config["displayHeader"] = value;
+        }),
+    );
+
+    new Setting(contentEl).setName("Display footer").addToggle((toggle) =>
+      toggle
+        .setTooltip("Display footer")
+        .setValue(this.config["displayFooter"])
+        .onChange(async (value) => {
+          this.config["displayFooter"] = value;
         }),
     );
 
@@ -284,6 +388,5 @@ export class ExportConfigModal extends Modal {
   onClose() {
     const { contentEl } = this;
     contentEl.empty();
-    electron.webFrame.setZoomLevel(0);
   }
 }

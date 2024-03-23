@@ -29,7 +29,6 @@ export default class ConfigSettingTab extends PluginSettingTab {
     const { containerEl } = this;
 
     containerEl.empty();
-    new Setting(containerEl).setName("Better Export PDF").setHeading();
 
     const supportDesc = new DocumentFragment();
     supportDesc.createDiv({
@@ -37,8 +36,6 @@ export default class ConfigSettingTab extends PluginSettingTab {
     });
     new Setting(containerEl).setDesc(supportDesc);
     renderBuyMeACoffeeBadge(containerEl);
-
-    new Setting(containerEl).setName("General").setHeading();
 
     new Setting(containerEl).setName("Add filename as title").addToggle((toggle) =>
       toggle
@@ -49,15 +46,47 @@ export default class ConfigSettingTab extends PluginSettingTab {
           this.plugin.saveSettings();
         }),
     );
-    new Setting(containerEl).setName("Display header/footer").addToggle((toggle) =>
+    new Setting(containerEl).setName("Display header").addToggle((toggle) =>
       toggle
-        .setTooltip("Display header/footer")
-        .setValue(this.plugin.settings.displayHeaderFooter)
+        .setTooltip("Display header")
+        .setValue(this.plugin.settings.displayHeader)
         .onChange(async (value) => {
-          this.plugin.settings.displayHeaderFooter = value;
+          this.plugin.settings.displayHeader = value;
           this.plugin.saveSettings();
         }),
     );
+    new Setting(containerEl).setName("Display footer").addToggle((toggle) =>
+      toggle
+        .setTooltip("Display footer")
+        .setValue(this.plugin.settings.displayFooter)
+        .onChange(async (value) => {
+          this.plugin.settings.displayFooter = value;
+          this.plugin.saveSettings();
+        }),
+    );
+
+    new Setting(containerEl)
+      .setName("Print background")
+      .setDesc("Whether to print background graphics")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.printBackground).onChange(async (value) => {
+          this.plugin.settings.printBackground = value;
+          this.plugin.saveSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("Generate tagged PDF")
+      .setDesc("Whether or not to generate a tagged (accessible) PDF. Defaults to false. As this property is experimental, the generated PDF may not adhere fully to PDF/UA and WCAG standards.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.generateTaggedPDF).onChange(async (value) => {
+          this.plugin.settings.generateTaggedPDF = value;
+          this.plugin.saveSettings();
+        }),
+      );
+
+
+			
     new Setting(containerEl).setName("Max headings level of the outline").addDropdown((dropdown) => {
       dropdown
         .addOptions(Object.fromEntries(["1", "2", "3", "4", "5", "6"].map((level) => [level, `h${level}`])))
@@ -67,6 +96,16 @@ export default class ConfigSettingTab extends PluginSettingTab {
           this.plugin.saveSettings();
         });
     });
+
+    new Setting(containerEl)
+      .setName("PDF metadata")
+      .setDesc("Add frontMatter(title, author, keywords, subjectm creator, etc) to pdf metadata")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.displayMetadata).onChange(async (value) => {
+          this.plugin.settings.displayMetadata = value;
+          this.plugin.saveSettings();
+        }),
+      );
 
     new Setting(containerEl).setName("Advanced").setHeading();
 
